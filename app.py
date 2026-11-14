@@ -33,6 +33,7 @@ from modules.ai_assistant import (
     generate_cover_prompt_idea,
     generate_cover_artwork_image
 )
+from modules.kindle_sender import send_to_kindle
 
 # ページ基本設定
 st.set_page_config(
@@ -59,6 +60,20 @@ if "author" not in st.session_state:
     st.session_state.author = "著者名"
 if "publisher" not in st.session_state:
     st.session_state.publisher = ""
+if "kindle_email" not in st.session_state:
+    st.session_state.kindle_email = "e.enelab_9x63KU@kindle.com"
+if "sender_email" not in st.session_state:
+    st.session_state.sender_email = ""
+if "smtp_password" not in st.session_state:
+    st.session_state.smtp_password = ""
+if "smtp_host" not in st.session_state:
+    st.session_state.smtp_host = "smtp.gmail.com"
+if "smtp_port" not in st.session_state:
+    st.session_state.smtp_port = 587
+if "last_epub_bytes" not in st.session_state:
+    st.session_state.last_epub_bytes = None
+if "last_epub_filename" not in st.session_state:
+    st.session_state.last_epub_filename = ""
 
 def handle_uploaded_files():
     """原稿アップロード時のコールバック（ウィジェット描画前に実行され、タイトル・著者・出版社の自動反映が可能）"""
@@ -299,25 +314,130 @@ with tab2:
         
         epub_cover_bytes = st.session_state.cover_image_bytes if use_cover_in_epub else None
         
-        if st.button("✨ KDP用 EPUB を書き出す", type="primary"):
-            with st.spinner("EPUB 3.0 ファイルをパッケージング中..."):
-                epub_data = create_epub3(
-                    title=book_title,
-                    author=author,
-                    chapters=merged_doc.chapters,
-                    is_vertical=is_vertical,
-                    cover_image_bytes=epub_cover_bytes,
-                    cover_image_ext="jpg"
-                )
+        col_epub_gen, col_epub_dl = st.columns([1, 1])
+        with col_epub_gen:
+            if st.button("✨ KDP用 EPUB を書き出す", type="primary"):
+                with st.spinner("EPUB 3.0 ファイルをパッケージング中..."):
+                    epub_data = create_epub3(
+                        title=book_title,
+                        author=author,
+                        chapters=merged_doc.chapters,
+                        is_vertical=is_vertical,
+                        cover_image_bytes=epub_cover_bytes,
+                        cover_image_ext="jpg"
+                    )
+                    st.session_state.last_epub_bytes = epub_data
+                    st.session_state.last_epub_filename = f"{book_title}.epub"
+                    
+                st.balloons()
+                st.success("✅ EPUBの生成が完了しました！")
                 
-            st.balloons()
-            st.success("✅ EPUBの生成が完了しました！以下のボタンからダウンロードできます。")
-            st.download_button(
-                label=f"📥 {book_title}.epub をダウンロード",
-                data=epub_data,
-                file_name=f"{book_title}.epub",
-                mime="application/epub+zip"
+        with col_epub_dl:
+            if st.session_state.last_epub_bytes:
+                st.download_button(
+                    label=f"📥 {st.session_state.last_epub_filename} をダウンロード",
+                    data=st.session_state.last_epub_bytes,
+                    file_name=st.session_state.last_epub_filename,
+                    mime="application/epub+zip"
+                )
+
+        # ----------------- Send to Kindle セクション -----------------
+        st.divider()
+        st.markdown("### 📲 Send to Kindle（Kindle端末へ直接送る）")
+        st.caption(
+            "Kindle端末やiPad・スマホのKindleアプリ宛てに、電子書籍（EPUB）を直接メール送信してライブラリに自動同期します。"
+        )
+        
+        target_kindle = st.text_input(
+            "送信先 Kindle メールアドレス",
+            value=st.session_state.kindle_email,
+            help="Kindle端末の設定画面、またはAmazonの「コンテンツと端末の管理」に表示されている @kindle.com アドレスです。"
+        )
+        st.session_state.kindle_email = target_kindle
+
+        with st.expander("⚙️ 送信元メール設定（初回のみ・Gmail推奨）", expanded=not bool(st.session_state.sender_email and st.session_state.smtp_password)):
+            st.markdown(
+                """
+                Kindleへのメール送信には、**送信元となるご自身のメールアドレス（差出人）**とSMTP設定が必要です。
+                
+                > ⚠️ **【重要】Amazon側での事前承認が必要です**  
+                > 迷惑メール防止のため、Amazonアカウント側で送信元アドレスが承認されていないとメールが破棄されます。  
+                > 1. [Amazon コンテンツと端末の管理（環境設定）](https://www.amazon.co.jp/hz/mycd/myx#/home/settings/payment) を開きます。  
+                > 2. **「パーソナル・ドキュメント設定」** の **「承認済みEメールアドレス一覧」** に、下の「送信元メールアドレス」を追加してください。
+                """
             )
+            col_s1, col_s2 = st.columns(2)
+            with col_s1:
+                st.session_state.sender_email = st.text_input(
+                    "送信元メールアドレス（Amazon承認済みアドレス）",
+                    value=st.session_state.sender_email,
+                    placeholder="your-name@gmail.com"
+                )
+            with col_s2:
+                st.session_state.smtp_password = st.text_input(
+                    "SMTPパスワード（Gmailの場合はアプリパスワード）",
+                    value=st.session_state.smtp_password,
+                    type="password",
+                    placeholder="16桁のアプリパスワード",
+                    help="Gmailをご利用の場合、Googleアカウント管理 > セキュリティ > 2段階認証 > アプリパスワード で発行した16桁の文字列を入力してください。"
+                )
+            
+            with st.expander("詳細サーバー設定（通常は変更不要）"):
+                col_h, col_p = st.columns(2)
+                with col_h:
+                    st.session_state.smtp_host = st.text_input("SMTPホスト", value=st.session_state.smtp_host)
+                with col_p:
+                    st.session_state.smtp_port = st.number_input("SMTPポート", value=int(st.session_state.smtp_port), min_value=1, max_value=65535)
+
+        col_send_btn, col_web_link = st.columns([1, 1])
+        with col_send_btn:
+            send_kindle_btn = st.button("📤 EPUBをKindle端末に送信する", type="primary")
+            
+        with col_web_link:
+            st.markdown(
+                """
+                <div style="padding-top: 6px; font-size: 0.9em; color: #555;">
+                💡 <b>メール設定なしですぐ送りたい場合:</b><br>
+                公式 <a href="https://www.amazon.co.jp/sendtokindle" target="_blank" style="text-decoration: underline; font-weight: bold;">Web版 Send to Kindle</a> にダウンロードしたEPUBをドラッグ＆ドロップでも送信可能です。
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+
+        if send_kindle_btn:
+            epub_to_send = st.session_state.last_epub_bytes
+            filename_to_send = st.session_state.last_epub_filename or f"{book_title}.epub"
+            if not epub_to_send:
+                with st.spinner("送信用のEPUBを生成中..."):
+                    epub_to_send = create_epub3(
+                        title=book_title,
+                        author=author,
+                        chapters=merged_doc.chapters,
+                        is_vertical=is_vertical,
+                        cover_image_bytes=epub_cover_bytes,
+                        cover_image_ext="jpg"
+                    )
+                    st.session_state.last_epub_bytes = epub_to_send
+                    st.session_state.last_epub_filename = filename_to_send
+
+            with st.spinner(f"Kindle宛て（{target_kindle}）に電子書籍を送信中..."):
+                success, msg = send_to_kindle(
+                    kindle_email=target_kindle,
+                    sender_email=st.session_state.sender_email,
+                    smtp_password=st.session_state.smtp_password,
+                    file_bytes=epub_to_send,
+                    file_name=filename_to_send,
+                    smtp_host=st.session_state.smtp_host,
+                    smtp_port=int(st.session_state.smtp_port),
+                    subject=book_title
+                )
+
+            if success:
+                st.balloons()
+                st.success(f"🎉 {msg}")
+                st.info("💡 送信後、数分〜十数分ほどでWi-Fi接続されたKindle端末やKindleアプリの「ライブラリ」に自動同期されます。")
+            else:
+                st.error(f"❌ {msg}")
 
 # -------------------------------------------------------------
 # タブ3: ペーパーバック (PDF) 出力
